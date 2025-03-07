@@ -67,10 +67,10 @@ app.get("/doctors", async (req, res) => {
         const doctors = await Doctor.find();
         const updatedDoctors = doctors.map(doctor => {
             const videoDir = path.join(__dirname, 'videos', doctor.videoId);
-            const videoFilePath = path.join(videoDir, 'final_video.webm');
+            const videoFilePath = path.join(videoDir, 'final_video.mp4');
             if (fs.existsSync(videoFilePath)) {
                 doctor = doctor.toObject();
-                doctor.videoUrl = `${process.env.BACK_END_URL}/videos/${doctor.videoId}/final_video.webm`;
+                doctor.videoUrl = `${process.env.BACK_END_URL}/videos/${doctor.videoId}/final_video.mp4`;
             } else {
                 doctor = doctor.toObject();
                 doctor.videoUrl = null;                
@@ -101,7 +101,7 @@ app.post('/doctors', async (req, res) => {
         text: `Click the link to record: ${process.env.FRONT_END_URL}/record/${doctor.videoId}`
     };
 
-    //sendgridMail.send(emailContent);
+    sendgridMail.send(emailContent);
     res.status(201).json(doctor);
 });
 
@@ -170,7 +170,7 @@ app.post('/upload/:videoId', upload.single('video'), (req, res) => {
 // Endpoint to finalize video upload and join all chunks
 app.post('/finishUpload/:videoId', async (req, res) => {
     const videoDir = path.join(__dirname, 'videos', req.params.videoId);
-    const outputFilePath = path.join(videoDir, 'final_video.webm');
+    const outputFilePath = path.join(videoDir, 'final_video.mp4');
 
     try {
         const files = fs.readdirSync(videoDir).filter(file => file.endsWith('.webm'));
@@ -180,7 +180,8 @@ app.post('/finishUpload/:videoId', async (req, res) => {
             return res.status(400).json({ message: 'No video chunks found' });
         }
 
-        const writeStream = fs.createWriteStream(outputFilePath);
+        const tempFilePath = path.join(videoDir, 'temp_video.webm');
+        const writeStream = fs.createWriteStream(tempFilePath);
 
         for (const file of files) {
             const filePath = path.join(videoDir, file);
@@ -190,8 +191,30 @@ app.post('/finishUpload/:videoId', async (req, res) => {
 
         writeStream.end();
 
-        writeStream.on('finish', () => {
-            res.status(200).json({ message: 'Video file created successfully', filePath: outputFilePath });
+        writeStream.on('finish', async () => {
+            try {
+                const doctor = await Doctor.findOne({ videoId: req.params.videoId });
+                const doctorName = doctor ? doctor.name : 'Unknown Doctor';
+
+                ffmpeg(tempFilePath)
+                    //.outputOptions('-vf', `drawtext=text='Dr. ${doctorName}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w)/2:y=h-(text_h*2)`)
+                    .outputOptions('-vf', `drawtext=text='Dr. ${doctorName}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=0:y=h-(text_h*2)`)
+
+
+                    .output(outputFilePath)
+                    .on('end', () => {
+                        fs.unlinkSync(tempFilePath); // Remove the temporary video file
+                        res.status(200).json({ message: 'Video file created successfully', filePath: outputFilePath });
+                    })
+                    .on('error', (err) => {
+                        console.error("❌ Error processing video:", err);
+                        res.status(500).json({ message: "Server error", error: err.message });
+                    })
+                    .run();
+            } catch (error) {
+                console.error("❌ Error finalizing video upload:", error);
+                res.status(500).json({ message: "Server error", error: error.message });
+            }
         });
 
         writeStream.on('error', (err) => {
