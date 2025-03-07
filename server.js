@@ -4,6 +4,8 @@
 // 2. SendGrid email with unique link for video recording
 // 3. Real-time video saving on server
 // 4. Finalize video recording upon finish button click
+// S3 AccessKey: AKIAWIJIUX5FCZ3ZP2NQ
+// S3 SecretAccessKey: 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
 
 // Backend: Express + MongoDB + SendGrid
 require('dotenv').config(); // Load environment variables from .env
@@ -129,8 +131,6 @@ app.delete('/doctors/:id', async (req, res) => {
                     fs.unlinkSync(path.join(videoDir, file));
                 }
                 fs.rmdirSync(videoDir);
-            } else {
-                console.log("no dir");
             }
             res.json({ message: 'Doctor and related video files deleted successfully' });
         } else {
