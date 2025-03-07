@@ -197,10 +197,9 @@ app.post('/finishUpload/:videoId', async (req, res) => {
                 const doctorName = doctor ? doctor.name : 'Unknown Doctor';
 
                 ffmpeg(tempFilePath)
-                    //.outputOptions('-vf', `drawtext=text='Dr. ${doctorName}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w)/2:y=h-(text_h*2)`)
+                    .inputFormat('webm')
                     .outputOptions('-vf', `drawtext=text='Dr. ${doctorName}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=0:y=h-(text_h*2)`)
-
-
+                    .outputOptions('-c:a copy') // Ensure audio is copied
                     .output(outputFilePath)
                     .on('end', () => {
                         fs.unlinkSync(tempFilePath); // Remove the temporary video file
