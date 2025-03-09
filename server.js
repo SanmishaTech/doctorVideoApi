@@ -16,10 +16,10 @@ const cors = require('cors');
 const sendgridMail = require('@sendgrid/mail');
 const { v4: uuidv4 } = require('uuid');
 const Joi = require('joi');
-const fs = require('fs');
 const multer = require('multer');
 const path = require('path');
-const ffmpeg = require('fluent-ffmpeg');
+const cloudinary = require('cloudinary').v2;
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -37,6 +37,13 @@ app.use(cors({
 }));
 
 sendgridMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+// Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 // Connect to MongoDB
 mongoose
@@ -67,18 +74,18 @@ const doctorValidationSchema = Joi.object({
 app.get("/doctors", async (req, res) => {
     try {
         const doctors = await Doctor.find();
-        const updatedDoctors = doctors.map(doctor => {
-            const videoDir = path.join(__dirname, 'videos', doctor.videoId);
-            const videoFilePath = path.join(videoDir, 'final_video.mp4');
-            if (fs.existsSync(videoFilePath)) {
+        const updatedDoctors = await Promise.all(doctors.map(async doctor => {
+            const videoUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload/${doctor.videoId}/final_video.webm`;
+            try {
+                const result = await cloudinary.api.resource(`${doctor.videoId}/final_video`, { resource_type: 'video' });
                 doctor = doctor.toObject();
-                doctor.videoUrl = `${process.env.BACK_END_URL}/videos/${doctor.videoId}/final_video.mp4`;
-            } else {
+                doctor.videoUrl = result.secure_url;
+            } catch (error) {
                 doctor = doctor.toObject();
-                doctor.videoUrl = null;                
+                doctor.videoUrl = null;
             }
             return doctor;
-        });
+        }));
         res.json(updatedDoctors);
     } catch (error) {
         console.error("❌ Error fetching doctors:", error);
@@ -120,19 +127,21 @@ app.put('/doctors/:id', async (req, res) => {
 
 // Delete a doctor
 app.delete('/doctors/:id', async (req, res) => {
-    try {        
+    try {
         const doctor = await Doctor.findByIdAndDelete(req.params.id);
         if (doctor) {
-            const videoDir = path.join(__dirname, 'videos', doctor.videoId);
-
-            if (fs.existsSync(videoDir)) {
-                const files = fs.readdirSync(videoDir);
-                for (const file of files) {
-                    fs.unlinkSync(path.join(videoDir, file));
-                }
-                fs.rmdirSync(videoDir);
+            if (doctor.videoUrl) {
+                const publicId = doctor.videoUrl.split('/').pop().split('.')[0];
+                cloudinary.uploader.destroy(publicId, { resource_type: 'video' }, (error, result) => {
+                    if (error) {
+                        console.error("❌ Error deleting video:", error);
+                        return res.status(500).json({ message: "Server error", error: error.message });
+                    }
+                    res.json({ message: 'Doctor and related video files deleted successfully' });
+                });
+            } else {
+                res.json({ message: 'Doctor and related video files deleted successfully' });
             }
-            res.json({ message: 'Doctor and related video files deleted successfully' });
         } else {
             res.status(404).json({ message: 'Doctor not found' });
         }
@@ -170,7 +179,7 @@ app.post('/upload/:videoId', upload.single('video'), (req, res) => {
 // Endpoint to finalize video upload and join all chunks
 app.post('/finishUpload/:videoId', async (req, res) => {
     const videoDir = path.join(__dirname, 'videos', req.params.videoId);
-    const outputFilePath = path.join(videoDir, 'final_video.mp4');
+    const outputFilePath = path.join(videoDir, `${req.params.videoId}.webm`);
 
     try {
         const files = fs.readdirSync(videoDir).filter(file => file.endsWith('.webm'));
@@ -180,8 +189,7 @@ app.post('/finishUpload/:videoId', async (req, res) => {
             return res.status(400).json({ message: 'No video chunks found' });
         }
 
-        const tempFilePath = path.join(videoDir, 'temp_video.webm');
-        const writeStream = fs.createWriteStream(tempFilePath);
+        const writeStream = fs.createWriteStream(outputFilePath);
 
         for (const file of files) {
             const filePath = path.join(videoDir, file);
@@ -194,24 +202,36 @@ app.post('/finishUpload/:videoId', async (req, res) => {
         writeStream.on('finish', async () => {
             try {
                 const doctor = await Doctor.findOne({ videoId: req.params.videoId });
-                const doctorName = doctor ? doctor.name : 'Unknown Doctor';
-
-                ffmpeg(tempFilePath)
-                    .inputFormat('webm')
-                    .outputOptions('-vf', `drawtext=text='Dr. ${doctorName}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=0:y=h-(text_h*2)`)
-                    .outputOptions('-c:a copy') // Ensure audio is copied
-                    .output(outputFilePath)
-                    .on('end', () => {
-                        fs.unlinkSync(tempFilePath); // Remove the temporary video file
-                        res.status(200).json({ message: 'Video file created successfully', filePath: outputFilePath });
-                    })
-                    .on('error', (err) => {
-                        console.error("❌ Error processing video:", err);
-                        res.status(500).json({ message: "Server error", error: err.message });
-                    })
-                    .run();
+                const doctorName = doctor ? `Dr. ${doctor.name}` : 'Unknown Doctor';
+        
+                const result = await cloudinary.uploader.upload(outputFilePath, {
+                    resource_type: 'video',
+                    public_id: `${req.params.videoId}/final_video`,
+                    transformation: [
+                        {
+                            overlay: {
+                                font_family: "Arial",
+                                font_size: 24,
+                                font_weight: "bold",
+                                text: encodeURIComponent(doctorName),
+                                //url: "https://res.cloudinary.com/demo/image/upload/logos/cloudinary_icon_white.png"
+                            },                            
+                            //flags: "layer_apply",
+                            gravity: "south",
+                            y: 5,
+                            color: "white",
+                            background: "black",
+                            crop: "fit"
+                        }
+                    ]                    
+                });
+        
+                fs.unlinkSync(outputFilePath); // Remove the final video file
+                doctor.videoUrl = result.secure_url;
+                await doctor.save();
+                res.status(200).json({ message: 'Video file created successfully', filePath: result.secure_url });
             } catch (error) {
-                console.error("❌ Error finalizing video upload:", error);
+                console.error("❌ Error uploading final video:", error);
                 res.status(500).json({ message: "Server error", error: error.message });
             }
         });
